@@ -21,6 +21,7 @@ from multiprocessing import Pool
 import subprocess
 from subprocess import Popen, PIPE
 from urllib import parse
+import glob
 
 from tqdm import tqdm
 
@@ -105,11 +106,20 @@ def task_proxy(kwargs):
     return download_and_process_video(**kwargs)
 
 
+def find_best_file_matching(file_prefix):
+    files = glob.glob(file_prefix + ".*")
+    if len(files) == 0:
+        raise FileNotFoundError(f'No files matching {file_prefix}')
+    if len(files) > 1:
+        raise FileNotFoundError(f'More than one file matching {file_prefix}')
+    return files[0]
+
+
 def download_and_process_video(video_data: Dict, output_dir: str):
     """
     Downloads the video and cuts/crops it into several ones according to the provided time intervals
     """
-    raw_download_path = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}.mp4")
+    raw_download_path = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}")
     raw_download_log_file = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}_download_log.txt")
     download_result = download_video(video_data['id'], raw_download_path, resolution=video_data['resolution'], log_file=raw_download_log_file)
 
@@ -117,6 +127,8 @@ def download_and_process_video(video_data: Dict, output_dir: str):
         print('Failed to download', video_data)
         print(f'See {raw_download_log_file} for details')
         return
+
+    raw_download_path = find_best_file_matching(raw_download_path)
 
     # We do not know beforehand, what will be the resolution of the downloaded video
     # Youtube-dl selects a (presumably) highest one
@@ -128,7 +140,7 @@ def download_and_process_video(video_data: Dict, output_dir: str):
     for clip_idx in range(len(video_data['intervals'])):
         start, end = video_data['intervals'][clip_idx]
         clip_name = f'{video_data["name"]}_{clip_idx:03d}'
-        clip_path = os.path.join(output_dir, clip_name + '.mp4')
+        clip_path = os.path.join(output_dir, clip_name + ".mp4")
         crop_success = cut_and_crop_video(raw_download_path, clip_path, start, end, video_data['crops'][clip_idx])
 
         if not crop_success:
@@ -165,12 +177,12 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
         stderr = subprocess.DEVNULL
     else:
         stderr = open(log_file, "a")
-    video_selection = f"bestvideo[ext={video_format}]"
+    video_selection = f"bestvideo"
     video_selection = video_selection if resolution is None else f"{video_selection}[height={resolution}]"
     command = [
-        "youtube-dl",
+        "yt-dlp",
         "https://youtube.com/watch?v={}".format(video_id), "--quiet", "-f",
-        video_selection,
+        video_selection + "+bestaudio",
         "--output", download_path,
         "--no-continue"
     ]
@@ -180,7 +192,8 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
     if log_file is not None:
         stderr.close()
 
-    return success and os.path.isfile(download_path)
+    matching_file = find_best_file_matching(download_path)
+    return success and os.path.isfile(matching_file)
 
 
 def get_video_resolution(video_path: os.PathLike) -> int:
@@ -212,7 +225,12 @@ def cut_and_crop_video(raw_video_path, output_path, start, end, crop: List[int])
         "ffmpeg", "-i", raw_video_path,
         "-strict", "-2", # Some legacy arguments
         "-loglevel", "quiet", # Verbosity arguments
-        "-qscale", "0", # Preserve the quality
+        # "-qscale", "0", # Preserve the quality
+        "-c:v", "h264_nvenc",
+        "-preset", "slow",
+        "-b:v", "0",
+        "-cq:v", "24",
+        "-rc:v", "vbr",
         "-y", # Overwrite if the file exists
         "-ss", str(start), "-to", str(end), # Cut arguments
         "-filter:v", f'"crop={out_w}:{out_h}:{x}:{y}"', # Crop arguments
